@@ -6,6 +6,7 @@ from rich.table import Table
 
 from observatory.db import get_connection
 from observatory.metrics import BenchmarkMetrics
+from observatory.quality import QualityJudge
 from observatory.runners import RUNNERS
 from observatory.tasks import load_tasks, seed_tasks
 
@@ -189,6 +190,78 @@ def metrics(
             f"{row[10]:.0f}" if row[10] else "—",
         )
     console.print(table)
+
+
+@app.command()
+def score(
+    provider: str = typer.Option(None, "--provider", "-p", help="Filter by provider"),
+    model: str = typer.Option(None, "--model", "-m", help="Filter by model"),
+    task_id: str = typer.Option(None, "--task", "-t", help="Score a single task"),
+    check_consistency: bool = typer.Option(False, "--consistency", "-c", help="Run 3x and report variance"),
+):
+    """Score existing run outputs using LLM-as-judge (claude-sonnet-4-6)."""
+    conn = get_connection()
+
+    where_clauses = ["output_text IS NOT NULL", "output_text != ''"]
+    params = []
+    if provider:
+        where_clauses.append("r.provider = ?")
+        params.append(provider)
+    if model:
+        where_clauses.append("r.model = ?")
+        params.append(model)
+    if task_id:
+        where_clauses.append("r.task_id = ?")
+        params.append(task_id)
+
+    where = f"WHERE {' AND '.join(where_clauses)}"
+
+    rows = conn.execute(
+        f"""
+        SELECT r.id, r.provider, r.model, r.task_id, r.output_text, t.category, t.prompt
+        FROM runs r JOIN tasks t ON r.task_id = t.id
+        {where}
+        ORDER BY r.provider, r.model, r.task_id
+        """,
+        params,
+    ).fetchall()
+
+    if not rows:
+        console.print("[yellow]No runs to score. Run benchmarks first.[/yellow]")
+        return
+
+    judge = QualityJudge()
+    console.print(f"Scoring {len(rows)} runs with [magenta]{judge.model}[/magenta]...\n")
+
+    for run_id, prov, mod, tid, output, category, prompt in rows:
+        console.print(f"  [cyan]{tid}[/cyan] ({prov}/{mod})...", end=" ")
+
+        if check_consistency:
+            result, std_dev = judge.score_with_consistency(category, prompt, output)
+            if result.error:
+                console.print(f"[red]ERROR: {result.error}[/red]")
+                continue
+            consistency = "[green]STABLE[/green]" if std_dev < 0.3 else "[yellow]VARIABLE[/yellow]"
+            console.print(
+                f"[green]{result.overall}/5[/green] std={std_dev} {consistency} "
+                f"({', '.join(f'{k}:{v}' for k, v in result.criteria_scores.items())})"
+            )
+        else:
+            result = judge.score(category, prompt, output)
+            if result.error:
+                console.print(f"[red]ERROR: {result.error}[/red]")
+                continue
+            console.print(
+                f"[green]{result.overall}/5[/green] "
+                f"({', '.join(f'{k}:{v}' for k, v in result.criteria_scores.items())})"
+            )
+
+        conn.execute(
+            "UPDATE runs SET quality_score = ? WHERE id = ?",
+            [result.overall, run_id],
+        )
+
+    console.print("\n[green]Quality scores saved to database.[/green]")
 
 
 if __name__ == "__main__":
