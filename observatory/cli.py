@@ -4,7 +4,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from observatory.db import get_connection
+from observatory.db import BenchmarkDB, get_connection
 from observatory.metrics import BenchmarkMetrics
 from observatory.quality import QualityJudge
 from observatory.runners import RUNNERS
@@ -262,6 +262,134 @@ def score(
         )
 
     console.print("\n[green]Quality scores saved to database.[/green]")
+
+
+@app.command()
+def summary(
+    provider: str = typer.Argument(help="Provider to summarize"),
+    days: int = typer.Option(30, "--days", "-d", help="Look back N days"),
+):
+    """Show provider summary: avg latency, cost, quality per model."""
+    db = BenchmarkDB()
+    rows = db.get_provider_summary(provider, days)
+    if not rows:
+        console.print(f"[yellow]No data for provider '{provider}' in the last {days} days.[/yellow]")
+        return
+
+    table = Table(title=f"Provider Summary: {provider} (last {days} days)")
+    table.add_column("Model", style="cyan")
+    table.add_column("Runs", justify="right")
+    table.add_column("Avg (ms)", justify="right")
+    table.add_column("p50 (ms)", justify="right", style="green")
+    table.add_column("p95 (ms)", justify="right", style="yellow")
+    table.add_column("Cost ($)", justify="right")
+    table.add_column("Avg Cost", justify="right")
+    table.add_column("Quality", justify="right", style="blue")
+    table.add_column("tok/s", justify="right")
+
+    for r in rows:
+        table.add_row(
+            r["model"], str(r["total_runs"]),
+            f"{r['avg_latency_ms']:.0f}", f"{r['p50_latency_ms']:.0f}", f"{r['p95_latency_ms']:.0f}",
+            f"{r['total_cost']:.6f}", f"{r['avg_cost']:.6f}",
+            f"{r['avg_quality']:.1f}" if r["avg_quality"] else "—",
+            f"{r['avg_tok_per_sec']:.1f}" if r["avg_tok_per_sec"] else "—",
+        )
+    console.print(table)
+
+
+@app.command()
+def breakdown(
+    task_id: str = typer.Argument(help="Task ID to break down"),
+):
+    """Compare all providers/models on a single task."""
+    db = BenchmarkDB()
+    rows = db.get_task_breakdown(task_id)
+    if not rows:
+        console.print(f"[yellow]No data for task '{task_id}'.[/yellow]")
+        return
+
+    table = Table(title=f"Task Breakdown: {task_id}")
+    table.add_column("Provider", style="magenta")
+    table.add_column("Model", style="cyan")
+    table.add_column("Runs", justify="right")
+    table.add_column("Avg (ms)", justify="right")
+    table.add_column("p50 (ms)", justify="right", style="green")
+    table.add_column("Avg Cost", justify="right")
+    table.add_column("Quality", justify="right", style="blue")
+    table.add_column("tok/s", justify="right")
+
+    for r in rows:
+        table.add_row(
+            r["provider"], r["model"], str(r["runs"]),
+            f"{r['avg_latency_ms']:.0f}", f"{r['p50_latency_ms']:.0f}",
+            f"{r['avg_cost']:.6f}",
+            f"{r['avg_quality']:.1f}" if r["avg_quality"] else "—",
+            f"{r['avg_tok_per_sec']:.1f}" if r["avg_tok_per_sec"] else "—",
+        )
+    console.print(table)
+
+
+@app.command()
+def trend(
+    provider: str = typer.Argument(help="Provider name"),
+    model: str = typer.Argument(help="Model name"),
+    metric: str = typer.Argument(help="Metric: latency_ms, cost_usd, quality_score, tokens_out"),
+    days: int = typer.Option(30, "--days", "-d", help="Look back N days"),
+):
+    """Show daily trend of a metric over time."""
+    db = BenchmarkDB()
+    try:
+        rows = db.get_trend(provider, model, metric, days)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if not rows:
+        console.print(f"[yellow]No trend data for {provider}/{model}.[/yellow]")
+        return
+
+    table = Table(title=f"Trend: {provider}/{model} — {metric} (last {days} days)")
+    table.add_column("Day", style="cyan")
+    table.add_column("Avg", justify="right", style="green")
+    table.add_column("Min", justify="right")
+    table.add_column("Max", justify="right")
+    table.add_column("Runs", justify="right")
+
+    for r in rows:
+        day_str = str(r["day"])[:10]
+        table.add_row(
+            day_str,
+            f"{r['avg_value']:.2f}",
+            f"{r['min_value']:.2f}",
+            f"{r['max_value']:.2f}",
+            str(r["runs"]),
+        )
+    console.print(table)
+
+
+@app.command()
+def pareto():
+    """Show cost vs. quality Pareto frontier."""
+    db = BenchmarkDB()
+    rows = db.get_pareto_front()
+    if not rows:
+        console.print("[yellow]No scored runs found. Run benchmarks and score them first.[/yellow]")
+        return
+
+    table = Table(title="Pareto Frontier: Cost vs. Quality")
+    table.add_column("Provider", style="magenta")
+    table.add_column("Model", style="cyan")
+    table.add_column("Avg Cost ($)", justify="right")
+    table.add_column("Avg Quality", justify="right", style="green")
+
+    for r in rows:
+        table.add_row(
+            r["provider"], r["model"],
+            f"{r['avg_cost']:.6f}",
+            f"{r['avg_quality']:.1f}",
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":
