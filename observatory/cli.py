@@ -11,6 +11,7 @@ from observatory.benchmark import (
     run_benchmark,
     send_macos_notification,
 )
+from observatory.analysis import run_full_analysis, generate_findings
 from observatory.dashboard import generate_dashboard
 from observatory.db import BenchmarkDB, get_connection
 from observatory.metrics import BenchmarkMetrics
@@ -535,6 +536,46 @@ def uninstall_schedule():
     subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
     plist_path.unlink()
     console.print("[green]Schedule uninstalled.[/green]")
+
+
+@app.command()
+def analyze(
+    days: int = typer.Option(30, "--days", "-d", help="Analysis window in days"),
+    output: str = typer.Option("FINDINGS.md", "--output", "-o", help="Output file path"),
+):
+    """Analyze benchmark data and generate FINDINGS.md recommendations."""
+    db = BenchmarkDB()
+    result = run_full_analysis(db, days)
+
+    console.print(f"[bold]Analysis ({days}-day window):[/bold]\n")
+
+    if result.pareto_winners:
+        console.print("[bold cyan]Category Winners:[/bold cyan]")
+        for w in result.pareto_winners:
+            console.print(f"  {w.category}: [green]{w.provider}/{w.model}[/green] Q={w.avg_quality}/5")
+    else:
+        console.print("[yellow]No scored data available yet.[/yellow]")
+
+    if result.cost_efficiency:
+        console.print("\n[bold cyan]Cost Efficiency:[/bold cyan]")
+        for w in result.cost_efficiency:
+            console.print(f"  {w.category}: [green]{w.provider}/{w.model}[/green] {w.quality_per_dollar:.0f} Q/$")
+
+    if result.consistency:
+        console.print("\n[bold cyan]Consistency:[/bold cyan]")
+        for c in result.consistency:
+            status = "[green]stable[/green]" if c.is_consistent else "[yellow]variable[/yellow]"
+            console.print(f"  {c.provider}/{c.model}: std={c.quality_std_dev:.3f} {status}")
+
+    if result.local_competitiveness:
+        console.print("\n[bold cyan]Local vs API:[/bold cyan]")
+        for lc in result.local_competitiveness:
+            verdict = "[green]competitive[/green]" if lc.is_competitive else "[red]not competitive[/red]"
+            console.print(f"  {lc.category}: gap={lc.quality_gap:.1f} {verdict}")
+
+    findings = generate_findings(result)
+    Path(output).write_text(findings)
+    console.print(f"\n[green]Findings written to {output}[/green]")
 
 
 if __name__ == "__main__":
