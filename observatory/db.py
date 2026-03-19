@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS runs (
     tokens_out INTEGER,
     cost_usd DOUBLE,
     quality_score DOUBLE,
-    output_text TEXT
+    output_text TEXT,
+    avg_cpu_percent DOUBLE,
+    avg_memory_percent DOUBLE,
+    run_index INTEGER DEFAULT 0,
+    batch_id VARCHAR
 );
 """
 
