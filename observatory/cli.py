@@ -11,6 +11,7 @@ from observatory.benchmark import (
     run_benchmark,
     send_macos_notification,
 )
+from observatory.dashboard import generate_dashboard
 from observatory.db import BenchmarkDB, get_connection
 from observatory.metrics import BenchmarkMetrics
 from observatory.quality import QualityJudge
@@ -434,9 +435,23 @@ def benchmark(
     console.print(f"  Total errors: {result['total_errors']}")
     console.print(f"  Total cost: ${result['total_cost']:.4f}")
 
+    # Auto-generate dashboard report
+    report_path = generate_dashboard()
+    console.print(f"  Report: [link=file://{report_path.resolve()}]{report_path}[/link]")
+
     if notify:
         msg = format_summary_notification(result)
         send_macos_notification("Inference Observatory", msg)
+
+
+@app.command()
+def dashboard(
+    output: str = typer.Option(None, "--output", "-o", help="Output HTML file path"),
+):
+    """Generate static HTML dashboard from benchmark results."""
+    output_path = Path(output) if output else None
+    path = generate_dashboard(output_path)
+    console.print(f"[green]Dashboard generated: {path}[/green]")
 
 
 @app.command()
