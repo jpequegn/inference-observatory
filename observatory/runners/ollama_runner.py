@@ -7,6 +7,7 @@ DEFAULT_MODELS = ["llama3.2", "gemma3", "mistral"]
 
 class OllamaRunner(BaseRunner):
     provider = "ollama"
+    is_local = True
 
     def __init__(self, model: str = "llama3.2"):
         super().__init__(model)

@@ -6,6 +6,7 @@ from observatory.runners.base import BaseRunner, RunResult
 
 class MLXRunner(BaseRunner):
     provider = "mlx"
+    is_local = True
 
     def __init__(self, model: str = "mlx-community/Llama-3.2-3B-Instruct-4bit"):
         super().__init__(model)
