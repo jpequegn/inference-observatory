@@ -1,0 +1,20 @@
+[project]
+name = "inference-observatory"
+version = "0.1.0"
+description = "Benchmark suite for comparing LLM inference providers"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+    "openai",
+    "ollama",
+    "duckdb",
+    "rich",
+    "typer",
+]
+
+[project.scripts]
+observatory = "observatory.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
