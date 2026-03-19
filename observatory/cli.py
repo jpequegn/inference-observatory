@@ -4,6 +4,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from observatory.benchmark import (
+    DEFAULT_MODELS,
+    estimate_cost,
+    format_summary_notification,
+    run_benchmark,
+    send_macos_notification,
+)
 from observatory.db import BenchmarkDB, get_connection
 from observatory.metrics import BenchmarkMetrics
 from observatory.quality import QualityJudge
@@ -390,6 +397,129 @@ def pareto():
             f"{r['avg_quality']:.1f}",
         )
     console.print(table)
+
+
+@app.command()
+def benchmark(
+    providers: list[str] = typer.Option(None, "--provider", "-p", help="Providers to benchmark (repeatable)"),
+    repeats: int = typer.Option(5, "--repeats", "-n", help="Runs per task per model"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip cost confirmation"),
+    notify: bool = typer.Option(True, "--notify/--no-notify", help="Send macOS notification on completion"),
+):
+    """Run full benchmark across all providers and models."""
+    if not providers:
+        providers = list(DEFAULT_MODELS.keys())
+
+    # Estimate cost and confirm
+    costs = estimate_cost(providers, num_tasks=20, repeats=repeats)
+    total_cost = sum(costs.values())
+
+    console.print("[bold]Estimated cost:[/bold]")
+    for p, c in costs.items():
+        console.print(f"  {p}: ${c:.4f}")
+    console.print(f"  [bold]Total: ${total_cost:.4f}[/bold]\n")
+
+    if total_cost > 2.0 and not yes:
+        confirm = typer.confirm(f"Estimated cost ${total_cost:.4f} exceeds $2. Continue?")
+        if not confirm:
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
+
+    console.print(f"Starting benchmark: {len(providers)} providers, {repeats} repeats per task...\n")
+    result = run_benchmark(providers=providers, repeats=repeats)
+
+    console.print(f"\n[green]Benchmark complete![/green]")
+    console.print(f"  Batch: {result['batch_id']}")
+    console.print(f"  Total runs: {result['total_runs']}")
+    console.print(f"  Total errors: {result['total_errors']}")
+    console.print(f"  Total cost: ${result['total_cost']:.4f}")
+
+    if notify:
+        msg = format_summary_notification(result)
+        send_macos_notification("Inference Observatory", msg)
+
+
+@app.command()
+def install_schedule():
+    """Install launchd plist for daily automated benchmarks at 6am."""
+    import os
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = plist_dir / "com.inference-observatory.plist"
+
+    log_dir = Path.home() / ".inference-observatory" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    working_dir = Path.cwd()
+    python_path = subprocess.run(
+        ["which", "python3"], capture_output=True, text=True
+    ).stdout.strip()
+
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.inference-observatory</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python_path}</string>
+        <string>-m</string>
+        <string>observatory.cli</string>
+        <string>benchmark</string>
+        <string>--yes</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{working_dir}</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/benchmark.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/benchmark-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}</string>
+        <key>OPENAI_API_KEY</key>
+        <string>{os.environ.get('OPENAI_API_KEY', '')}</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>{os.environ.get('ANTHROPIC_API_KEY', '')}</string>
+    </dict>
+</dict>
+</plist>"""
+
+    plist_path.write_text(plist_content)
+    console.print(f"[green]Plist written to {plist_path}[/green]")
+
+    # Load the agent
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+    result = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
+    if result.returncode == 0:
+        console.print("[green]Schedule installed! Daily benchmark at 6:00 AM.[/green]")
+    else:
+        console.print(f"[yellow]launchctl load returned: {result.stderr}[/yellow]")
+        console.print(f"You can manually load with: launchctl load {plist_path}")
+
+    console.print(f"Logs: {log_dir}/")
+
+
+@app.command()
+def uninstall_schedule():
+    """Uninstall the launchd daily benchmark schedule."""
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.inference-observatory.plist"
+    if not plist_path.exists():
+        console.print("[yellow]No schedule found.[/yellow]")
+        return
+
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+    plist_path.unlink()
+    console.print("[green]Schedule uninstalled.[/green]")
 
 
 if __name__ == "__main__":
