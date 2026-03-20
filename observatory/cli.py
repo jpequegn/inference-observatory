@@ -14,6 +14,7 @@ from observatory.benchmark import (
 from observatory.analysis import run_full_analysis, generate_findings
 from observatory.dashboard import generate_dashboard
 from observatory.db import BenchmarkDB, get_connection
+from observatory.grounding import GroundingJudge, GROUNDING_CATEGORIES
 from observatory.metrics import BenchmarkMetrics
 from observatory.quality import QualityJudge
 from observatory.runners import RUNNERS
@@ -576,6 +577,100 @@ def analyze(
     findings = generate_findings(result)
     Path(output).write_text(findings)
     console.print(f"\n[green]Findings written to {output}[/green]")
+
+
+@app.command()
+def grounding(
+    provider: str = typer.Option(None, "--provider", "-p", help="Filter by provider"),
+    model: str = typer.Option(None, "--model", "-m", help="Filter by model"),
+    task_id: str = typer.Option(None, "--task", "-t", help="Score a single task"),
+):
+    """Score grounding and detect hallucinations in existing run outputs."""
+    conn = get_connection()
+
+    where_clauses = [
+        "output_text IS NOT NULL",
+        "output_text != ''",
+        "t.category IN ('summarization', 'qa')",
+    ]
+    params = []
+    if provider:
+        where_clauses.append("r.provider = ?")
+        params.append(provider)
+    if model:
+        where_clauses.append("r.model = ?")
+        params.append(model)
+    if task_id:
+        where_clauses.append("r.task_id = ?")
+        params.append(task_id)
+
+    where = f"WHERE {' AND '.join(where_clauses)}"
+
+    rows = conn.execute(
+        f"""
+        SELECT r.id, r.provider, r.model, r.task_id, r.output_text, t.prompt, t.category
+        FROM runs r JOIN tasks t ON r.task_id = t.id
+        {where}
+        ORDER BY r.provider, r.model, r.task_id
+        """,
+        params,
+    ).fetchall()
+
+    if not rows:
+        console.print("[yellow]No runs to score for grounding (summarization/qa only).[/yellow]")
+        return
+
+    judge = GroundingJudge()
+    console.print(f"Scoring grounding for {len(rows)} runs...\n")
+
+    for run_id, prov, mod, tid, output, prompt, category in rows:
+        console.print(f"  [cyan]{tid}[/cyan] ({prov}/{mod})...", end=" ")
+
+        # Use the prompt as source context (in real use, this would be the transcript)
+        result = judge.score(prompt, output)
+        if result.error:
+            console.print(f"[red]ERROR: {result.error}[/red]")
+            continue
+
+        score_color = "green" if result.grounding_score >= 0.8 else "yellow" if result.grounding_score >= 0.5 else "red"
+        console.print(
+            f"[{score_color}]{result.grounding_score:.0%}[/{score_color}] grounded "
+            f"({result.grounded_claims}/{result.total_claims} claims) "
+            f"citations:{result.citations_found} "
+            f"{'hedges' if result.uncertainty_expressed else 'confident'}"
+        )
+
+        if result.ungrounded_claims:
+            for claim in result.ungrounded_claims[:3]:
+                console.print(f"    [red]hallucination:[/red] {claim}")
+
+        conn.execute(
+            "UPDATE runs SET grounding_score = ? WHERE id = ?",
+            [result.grounding_score, run_id],
+        )
+
+    console.print("\n[green]Grounding scores saved to database.[/green]")
+
+    # Show provider-level summary
+    summary_rows = conn.execute("""
+        SELECT provider, model, COUNT(*) as runs,
+            AVG(grounding_score) as avg_grounding,
+            SUM(CASE WHEN grounding_score < 0.8 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as halluc_pct
+        FROM runs WHERE grounding_score IS NOT NULL
+        GROUP BY provider, model ORDER BY avg_grounding DESC
+    """).fetchall()
+
+    if summary_rows:
+        console.print("\n[bold]Provider Trustworthiness:[/bold]")
+        table = Table()
+        table.add_column("Provider", style="magenta")
+        table.add_column("Model", style="cyan")
+        table.add_column("Runs", justify="right")
+        table.add_column("Grounding", justify="right", style="green")
+        table.add_column("Halluc %", justify="right", style="red")
+        for r in summary_rows:
+            table.add_row(r[0], r[1], str(r[2]), f"{r[3]:.0%}", f"{r[4]:.0f}%")
+        console.print(table)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS runs (
     avg_cpu_percent DOUBLE,
     avg_memory_percent DOUBLE,
     run_index INTEGER DEFAULT 0,
-    batch_id VARCHAR
+    batch_id VARCHAR,
+    grounding_score DOUBLE
 );
 """
 

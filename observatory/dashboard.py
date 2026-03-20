@@ -12,14 +12,15 @@ REPORTS_DIR = Path("reports")
 def _query_scatter_data(db: BenchmarkDB) -> list[dict]:
     """Cost vs Quality scatter data with Pareto frontier."""
     rows = db.conn.execute("""
-        SELECT provider, model, AVG(cost_usd) as avg_cost, AVG(quality_score) as avg_quality
+        SELECT provider, model, AVG(cost_usd) as avg_cost, AVG(quality_score) as avg_quality,
+            AVG(grounding_score) as avg_grounding
         FROM runs WHERE quality_score IS NOT NULL
         GROUP BY provider, model
     """).fetchall()
     pareto = {(r["provider"], r["model"]) for r in db.get_pareto_front()}
     return [
         {"provider": r[0], "model": r[1], "cost": r[2], "quality": r[3],
-         "pareto": (r[0], r[1]) in pareto}
+         "grounding": r[4], "pareto": (r[0], r[1]) in pareto}
         for r in rows
     ]
 
@@ -30,10 +31,11 @@ def _query_comparison_table(db: BenchmarkDB) -> list[dict]:
         SELECT provider, model, COUNT(*) as runs,
             AVG(latency_ms) as avg_latency, AVG(cost_usd) as avg_cost,
             AVG(quality_score) as avg_quality,
-            AVG(tokens_out) * 1000.0 / NULLIF(AVG(latency_ms), 0) as tok_per_sec
+            AVG(tokens_out) * 1000.0 / NULLIF(AVG(latency_ms), 0) as tok_per_sec,
+            AVG(grounding_score) as avg_grounding
         FROM runs GROUP BY provider, model ORDER BY provider, model
     """).fetchall()
-    cols = ["provider", "model", "runs", "avg_latency", "avg_cost", "avg_quality", "tok_per_sec"]
+    cols = ["provider", "model", "runs", "avg_latency", "avg_cost", "avg_quality", "tok_per_sec", "avg_grounding"]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -170,7 +172,7 @@ def _render_html(
   <div class="card full">
     <h2>Provider Comparison</h2>
     <table>
-      <thead><tr><th>Provider</th><th>Model</th><th>Runs</th><th>Avg Latency</th><th>Avg Cost</th><th>Quality</th><th>tok/s</th></tr></thead>
+      <thead><tr><th>Provider</th><th>Model</th><th>Runs</th><th>Avg Latency</th><th>Avg Cost</th><th>Quality</th><th>tok/s</th><th>Grounding</th></tr></thead>
       <tbody id="comparisonBody"></tbody>
     </table>
   </div>
@@ -234,7 +236,8 @@ const compBody = document.getElementById('comparisonBody');
 comparison.forEach(r => {{
   compBody.innerHTML += `<tr><td>${{r.provider}}</td><td>${{r.model}}</td><td>${{r.runs}}</td>` +
     `<td>${{r.avg_latency?.toFixed(0) || '—'}}ms</td><td>${{r.avg_cost?.toFixed(6) || '—'}}</td>` +
-    `<td>${{r.avg_quality?.toFixed(1) || '—'}}</td><td>${{r.tok_per_sec?.toFixed(1) || '—'}}</td></tr>`;
+    `<td>${{r.avg_quality?.toFixed(1) || '—'}}</td><td>${{r.tok_per_sec?.toFixed(1) || '—'}}</td>` +
+    `<td>${{r.avg_grounding ? (r.avg_grounding * 100).toFixed(0) + '%' : '—'}}</td></tr>`;
 }});
 
 // Winners table
